@@ -1,0 +1,6 @@
+
+.env.prod.db
+env/
+venv/
+__pycache__/
+*.pyc
