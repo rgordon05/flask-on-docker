@@ -1,0 +1,400 @@
+This is a step-by-step tutorial that details how to configure Flask to run on Docker with Postgres. For production environments, we'll add on Nginx and Gunicorn. We'll also take a look at how to serve static and user-uploaded media files via Nginx.
+Dependencies:
+- Flask v2.3.2
+- Docker v23.0.5
+- Python v3.11.3
+Contents
+Project Setup
+Create a new project directory and install Flask:
+$ mkdir flask-on-docker && cd flask-on-docker
+$ mkdir services && cd services
+$ mkdir web && cd web
+$ mkdir project
+$ python3.11 -m venv env
+$ source env/bin/activate
+(env)$ pip install flask==2.3.2
+Feel free to swap out virtualenv and Pip for uv, Poetry, or Pipenv. For more, review Modern Python Environments.
+Next, let's create a new Flask app.
+Add an __init__.py file to the "project" directory and configure the first route:
+from flask import Flask, jsonify
+app = Flask(__name__)
+@app.route("/")
+def hello_world():
+    return jsonify(hello="world")
+Then, to configure the Flask CLI tool to run and manage the app from the command line, add a manage.py file to the "web" directory:
+from flask.cli import FlaskGroup
+from project import app
+cli = FlaskGroup(app)
+if __name__ == "__main__":
+    cli()
+Here, we created a new FlaskGroup instance to extend the normal CLI with commands related to the Flask app.
+Run the server from the "web" directory:
+(env)$ export FLASK_APP=project/__init__.py
+(env)$ export FLASK_RUN_PORT=5001
+(env)$ python manage.py run
+Navigate to http://localhost:5001/. You should see:
+{
+  "hello": "world"
+}
+Kill the server once done. Exit then remove the virtual environment as well.
+Create a requirements.txt file in the "web" directory and add Flask as a dependency:
+Flask==2.3.2
+Your project structure should look like:
+└── services
+    └── web
+        ├── manage.py
+        ├── project
+        │   └── __init__.py
+        └── requirements.txt
+Docker
+Install Docker, if you don't already have it, then add a Dockerfile to the "web" directory:
+# pull official base image
+FROM python:3.11.3-slim-buster
+# set work directory
+WORKDIR /usr/src/app
+# set environment variables
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+# install dependencies
+RUN pip install --upgrade pip
+COPY ./requirements.txt /usr/src/app/requirements.txt
+RUN pip install -r requirements.txt
+# copy project
+COPY . /usr/src/app/
+So, we started with a slim-buster-based Docker image for Python 3.11.3. We then set a working directory along with two environment variables:
+- PYTHONDONTWRITEBYTECODE : Prevents Python from writing pyc files to disc (equivalent topython -B option)
+- PYTHONUNBUFFERED : Prevents Python from buffering stdout and stderr (equivalent topython -u option)
+Finally, we updated Pip, copied over the requirements.txt file, installed the dependencies, and copied over the Flask app itself.
+Review Docker Best Practices for Python Developers for more on structuring Dockerfiles as well as some best practices for configuring Docker for Python-based development.
+Next, add a docker-compose.yml file to the project root:
+version: '3.8'
+services:
+  web:
+    build: ./services/web
+    command: python manage.py run -h 0.0.0.0
+    volumes:
+      - ./services/web/:/usr/src/app/
+    ports:
+      - 5001:5000
+    env_file:
+      - ./.env.dev
+Review the Compose file reference for info on how this file works.
+Then, create a .env.dev file in the project root to store environment variables for development:
+FLASK_APP=project/__init__.py
+FLASK_DEBUG=1
+Build the image:
+$ docker-compose build
+Once the image is built, run the container:
+$ docker-compose up -d
+Navigate to http://localhost:5001/ to again view the hello world sanity check.
+Check for errors in the logs if this doesn't work via docker-compose logs -f.
+Postgres
+To configure Postgres, we need to add a new service to the docker-compose.yml file, set up Flask-SQLAlchemy, and install Psycopg2.
+First, add a new service called db to docker-compose.yml:
+version: '3.8'
+services:
+  web:
+    build: ./services/web
+    command: python manage.py run -h 0.0.0.0
+    volumes:
+      - ./services/web/:/usr/src/app/
+    ports:
+      - 5001:5000
+    env_file:
+      - ./.env.dev
+    depends_on:
+      - db
+  db:
+    image: postgres:13
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    environment:
+      - POSTGRES_USER=hello_flask
+      - POSTGRES_PASSWORD=hello_flask
+      - POSTGRES_DB=hello_flask_dev
+volumes:
+  postgres_data:
+To persist the data beyond the life of the container we configured a volume. This config will bind postgres_data to the "/var/lib/postgresql/data/" directory in the container.
+We also added an environment key to define a name for the default database and set a username and password.
+Review the "Environment Variables" section of the Postgres Docker Hub page for more info.
+Add a DATABASE_URL environment variable to .env.dev as well:
+FLASK_APP=project/__init__.py
+FLASK_DEBUG=1
+DATABASE_URL=postgresql://hello_flask:hello_flask@db:5432/hello_flask_dev
+Then, add a new file called config.py to the "project" directory, where we'll define environment-specific configuration variables:
+import os
+basedir = os.path.abspath(os.path.dirname(__file__))
+class Config(object):
+    SQLALCHEMY_DATABASE_URI = os.getenv("DATABASE_URL", "sqlite://")
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+Here, the database is configured based on the DATABASE_URL environment variable that we just defined. Take note of the default value.
+Update __init__.py to pull in the config on init:
+from flask import Flask, jsonify
+app = Flask(__name__)
+app.config.from_object("project.config.Config")
+@app.route("/")
+def hello_world():
+    return jsonify(hello="world")
+Add Flask-SQLAlchemy and Psycopg2 to requirements.txt:
+Flask==2.3.2
+Flask-SQLAlchemy==3.0.3
+psycopg2-binary==2.9.6
+Update __init__.py again to create a new SQLAlchemy instance and define a database model:
+from flask import Flask, jsonify
+from flask_sqlalchemy import SQLAlchemy
+app = Flask(__name__)
+app.config.from_object("project.config.Config")
+db = SQLAlchemy(app)
+class User(db.Model):
+    __tablename__ = "users"
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String(128), unique=True, nullable=False)
+    active = db.Column(db.Boolean(), default=True, nullable=False)
+    def __init__(self, email):
+        self.email = email
+@app.route("/")
+def hello_world():
+    return jsonify(hello="world")
+Finally, update manage.py:
+from flask.cli import FlaskGroup
+from project import app, db
+cli = FlaskGroup(app)
+@cli.command("create_db")
+def create_db():
+    db.drop_all()
+    db.create_all()
+    db.session.commit()
+if __name__ == "__main__":
+    cli()
+This registers a new command, create_db, to the CLI so that we can run it from the command line, which we'll use shortly to apply the model to the database.
+Build the new image and spin up the two containers:
+$ docker-compose up -d --build
+Create the table:
+$ docker-compose exec web python manage.py create_db
+Get the following error?
+sqlalchemy.exc.OperationalError: (psycopg2.OperationalError) FATAL: database "hello_flask_dev" does not exist
+Run docker-compose down -v to remove the volumes along with the containers. Then, re-build the images, run the containers, and apply the migrations.
+Ensure the users table was created:
+$ docker-compose exec db psql --username=hello_flask --dbname=hello_flask_dev
+psql (13.11)
+Type "help" for help.
+hello_flask_dev=# \l
+                                        List of databases
+      Name       |    Owner    | Encoding |  Collate   |   Ctype    |      Access privileges
+-----------------+-------------+----------+------------+------------+-----------------------------
+ hello_flask_dev | hello_flask | UTF8     | en_US.utf8 | en_US.utf8 |
+ postgres        | hello_flask | UTF8     | en_US.utf8 | en_US.utf8 |
+ template0       | hello_flask | UTF8     | en_US.utf8 | en_US.utf8 | =c/hello_flask             +
+                 |             |          |            |            | hello_flask=CTc/hello_flask
+ template1       | hello_flask | UTF8     | en_US.utf8 | en_US.utf8 | =c/hello_flask             +
+                 |             |          |            |            | hello_flask=CTc/hello_flask
+(4 rows)
+hello_flask_dev=# \c hello_flask_dev
+You are now connected to database "hello_flask_dev" as user "hello_flask".
+hello_flask_dev=# \dt
+          List of relations
+ Schema | Name  | Type  |    Owner
+--------+-------+-------+-------------
+ public | users | table | hello_flask
+(1 row)
+hello_flask_dev=# \q
+You can check that the volume was created as well by running:
+$ docker volume inspect flask-on-docker_postgres_data
+You should see something similar to:
+[
+    {
+        "CreatedAt": "2023-05-27T13:57:34Z",
+        "Driver": "local",
+        "Labels": {
+            "com.docker.compose.project": "flask-on-docker",
+            "com.docker.compose.version": "2.17.3",
+            "com.docker.compose.volume": "postgres_data"
+        },
+        "Mountpoint": "/var/lib/docker/volumes/flask-on-docker_postgres_data/_data",
+        "Name": "flask-on-docker_postgres_data",
+        "Options": null,
+        "Scope": "local"
+    }
+]
+Next, add an entrypoint.sh file to the "web" directory to verify that Postgres is up and healthy before creating the database table and running the Flask development server:
+#!/bin/sh
+if [ "$DATABASE" = "postgres" ]
+then
+    echo "Waiting for postgres..."
+    while ! nc -z $SQL_HOST $SQL_PORT; do
+      sleep 0.1
+    done
+    echo "PostgreSQL started"
+fi
+python manage.py create_db
+exec "$@"
+Take note of the environment variables.
+Update the file permissions locally:
+$ chmod +x services/web/entrypoint.sh
+Then, update the Dockerfile to install Netcat, copy over the entrypoint.sh file, and run the file as the Docker entrypoint command:
+# pull official base image
+FROM python:3.11.3-slim-buster
+# set work directory
+WORKDIR /usr/src/app
+# set environment variables
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+# install system dependencies
+RUN apt-get update && apt-get install -y netcat
+# install dependencies
+RUN pip install --upgrade pip
+COPY ./requirements.txt /usr/src/app/requirements.txt
+RUN pip install -r requirements.txt
+# copy project
+COPY . /usr/src/app/
+# run entrypoint.sh
+ENTRYPOINT ["/usr/src/app/entrypoint.sh"]
+Add the SQL_HOST, SQL_PORT, and DATABASE environment variables, for the entrypoint.sh script,  to .env.dev:
+FLASK_APP=project/__init__.py
+FLASK_DEBUG=1
+DATABASE_URL=postgresql://hello_flask:hello_flask@db:5432/hello_flask_dev
+SQL_HOST=db
+SQL_PORT=5432
+DATABASE=postgres
+Test it out again:
+- Re-build the images
+- Run the containers
+- Try http://localhost:5001/
+Let's also add a CLI seed command for adding sample users to the users table in manage.py:
+from flask.cli import FlaskGroup
+from project import app, db, User
+cli = FlaskGroup(app)
+@cli.command("create_db")
+def create_db():
+    db.drop_all()
+    db.create_all()
+    db.session.commit()
+@cli.command("seed_db")
+def seed_db():
+    db.session.add(User(email="[email protected]"))
+    db.session.commit()
+if __name__ == "__main__":
+    cli()
+Try it out:
+$ docker-compose exec web python manage.py seed_db
+$ docker-compose exec db psql --username=hello_flask --dbname=hello_flask_dev
+psql (13.11)
+Type "help" for help.
+hello_flask_dev=# \c hello_flask_dev
+You are now connected to database "hello_flask_dev" as user "hello_flask".
+hello_flask_dev=# select * from users;
+ id |        email        | active
+----+---------------------+--------
+  1 | [email protected] | t
+(1 row)
+hello_flask_dev=# \q
+Despite adding Postgres, we can still create an independent Docker image for Flask by not setting the DATABASE_URL environment variable. To test, build a new image and then run a new container:
+$ docker build -f ./services/web/Dockerfile -t hello_flask:latest ./services/web $ docker run -p 5001:5000 \ -e "FLASK_APP=project/__init__.py" -e "FLASK_DEBUG=1" \ hello_flask python /usr/src/app/manage.py run -h 0.0.0.0
+You should be able to view the hello world sanity check at http://localhost:5001.
+Gunicorn
+Moving along, for production environments, let's add Gunicorn, a production-grade WSGI server, to the requirements file:
+Flask==2.3.2
+Flask-SQLAlchemy==3.0.3
+gunicorn==20.1.0
+psycopg2-binary==2.9.6
+Since we still want to use Flask's built-in server in development, create a new compose file called docker-compose.prod.yml for production:
+version: '3.8'
+services:
+  web:
+    build: ./services/web
+    command: gunicorn --bind 0.0.0.0:5000 manage:app
+    ports:
+      - 5001:5000
+    env_file:
+      - ./.env.prod
+    depends_on:
+      - db
+  db:
+    image: postgres:13
+    volumes:
+      - postgres_data_prod:/var/lib/postgresql/data/
+    env_file:
+      - ./.env.prod.db
+volumes:
+  postgres_data_prod:
+If you have multiple environments, you may want to look at using a docker-compose.override.yml configuration file. With this approach, you'd add your base config to a docker-compose.yml file and then use a docker-compose.override.yml file to override those config settings based on the environment.
+Take note of the default command. We're running Gunicorn rather than the Flask development server. We also removed the volume from the web service since we don't need it in production. Finally, we're using separate environment variable files to define environment variables for both services that will be passed to the container at runtime.
+.env.prod:
+FLASK_APP=project/__init__.py
+FLASK_DEBUG=0
+DATABASE_URL=postgresql://hello_flask:hello_flask@db:5432/hello_flask_prod
+SQL_HOST=db
+SQL_PORT=5432
+DATABASE=postgres
+.env.prod.db:
+POSTGRES_USER=hello_flask
+POSTGRES_PASSWORD=hello_flask
+POSTGRES_DB=hello_flask_prod
+Add the two files to the project root. You'll probably want to keep them out of version control, so add them to a .gitignore file.
+Bring down the development containers (and the associated volumes with the -v flag):
+$ docker-compose down -v
+Then, build the production images and spin up the containers:
+$ docker-compose -f docker-compose.prod.yml up -d --build
+Verify that the hello_flask_prod database was created along with the users table. Test out http://localhost:5001/.
+Again, if the container fails to start, check for errors in the logs via docker-compose -f docker-compose.prod.yml logs -f.
+Production Dockerfile
+Did you notice that we're still running the create_db command, which drops all existing tables and then creates the tables from the models, every time the container is run? This is fine in development, but let's create a new entrypoint file for production.
+entrypoint.prod.sh:
+#!/bin/sh
+if [ "$DATABASE" = "postgres" ]
+then
+    echo "Waiting for postgres..."
+    while ! nc -z $SQL_HOST $SQL_PORT; do
+      sleep 0.1
+    done
+    echo "PostgreSQL started"
+fi
+exec "$@"
+Alternatively, instead of creating a new entrypoint file, you could alter the existing one like so:
+#!/bin/sh if [ "$DATABASE" = "postgres" ] then echo "Waiting for postgres..." while ! nc -z $SQL_HOST $SQL_PORT; do sleep 0.1 done echo "PostgreSQL started" fi if [ "$FLASK_DEBUG" = "1" ] then echo "Creating the database tables..." python manage.py create_db echo "Tables created" fi exec "$@"
+Update the file permissions locally:
+$ chmod +x services/web/entrypoint.prod.sh
+To use this file, create a new Dockerfile called Dockerfile.prod for use with production builds:
+###########
+# BUILDER #
+###########
+# pull official base image
+FROM python:3.11.3-slim-buster as builder
+# set work directory
+WORKDIR /usr/src/app
+# set environment variables
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+# install system dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gcc
+# lint
+RUN pip install --upgrade pip
+RUN pip install flake8==6.0.0
+COPY . /usr/src/app/
+RUN flake8 --ignore=E501,F401 .
+# install python dependencies
+COPY ./requirements.txt .
+RUN pip wheel --no-cache-dir --no-deps --wheel-dir /usr/src/app/wheels -r requirements.txt
+#########
+# FINAL #
+#########
+# pull official base image
+FROM python:3.11.3-slim-buster
+# create directory for the app user
+RUN mkdir -p /home/app
+# create the app user
+RUN addgroup --system app && adduser --system --group app
+# create the appropriate directories
+ENV HOME=/home/app
+ENV APP_HOME=/home/app/web
+RUN mkdir $APP_HOME
+WORKDIR $APP_HOME
+# install dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends netcat
+COPY --from=builder /usr/src/app/wheels /wheels
+COPY --from=builder /usr/src/app/requirements.txt .
+RUN pip install --upgrade pip
+RUN pip install --no-cache /wheels/*
+# copy entrypoint-prod.sh
+COPY ./entrypoint.prod.sh $APP_HOME
