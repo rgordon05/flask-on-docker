@@ -1,6 +1,6 @@
 # Flask on Docker
 
-[![Development build](https://github.com/rgordon05/flask-on-docker/actions/workflows/dev-build.yml/badge.svg)](https://github.com/rgordon05/flask-on-docker/actions/workflows/dev-build.yml)
+[![Development build](https://github.com/rgordon05/flask-on-docker/actions/workflows/dev-build.yml/badge.svg?branch=main&event=push)](https://github.com/rgordon05/flask-on-docker/actions/workflows/dev-build.yml)
 
 ## Overview
 
